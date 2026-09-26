@@ -3,7 +3,7 @@
 > Генеративный эмбиент-синтезатор в браузере для глубокой концентрации. Один HTML-файл, без сборки, без зависимостей — чистый Web Audio API и Web Components.
 
 <p align="center">
-  <img src="docs/screenshot.png" alt="Ambient Focus Station — интерфейс" width="320">
+  <img src="screenshot.png" alt="Ambient Focus Station — интерфейс" width="320">
 </p>
 
 <p align="center">
