@@ -1,0 +1,1004 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#0d0e10">
+<title>Ambient Focus Station</title>
+<style>
+  html, body {
+    background: #0d0e10;
+    margin: 0;
+    padding: 0;
+    min-height: 100%;
+  }
+  body {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+    padding: 16px;
+    box-sizing: border-box;
+    font-family: 'Courier New', Courier, monospace;
+  }
+</style>
+</head>
+<body>
+
+<ambient-synth-rack></ambient-synth-rack>
+
+<script>
+/* =========================================================================
+   УТИЛИТЫ
+   ========================================================================= */
+const parseOr = (v, fallback) => {
+  const n = parseFloat(v);
+  return isNaN(n) ? fallback : n;
+};
+const clamp01 = (v) => Math.max(0, Math.min(1, v));
+
+/* =========================================================================
+   1. АТОМЫ
+   ========================================================================= */
+
+class AudioLabel extends HTMLElement {
+  static get observedAttributes() { return ['color', 'type']; }
+  constructor() { super(); this.attachShadow({ mode: 'open' }); }
+  connectedCallback() { this.render(); }
+  attributeChangedCallback() { if (this.shadowRoot && this.shadowRoot.innerHTML) this.render(); }
+  render() {
+    const color = this.getAttribute('color') || '#38bdf8';
+    const type = this.getAttribute('type') || 'value';
+    this.shadowRoot.innerHTML = `
+      <style>
+        span {
+          font-family: 'Courier New', Courier, monospace;
+          font-size: 11px;
+          font-weight: bold;
+          text-transform: uppercase;
+          color: ${type === 'static' ? '#566175' : color};
+          text-shadow: ${type === 'static' ? 'none' : `0 0 6px ${color}`};
+          letter-spacing: 1px;
+          white-space: nowrap;
+        }
+      </style>
+      <span><slot></slot></span>
+    `;
+  }
+}
+customElements.define('audio-label', AudioLabel);
+
+
+class AudioButton extends HTMLElement {
+  static get observedAttributes() { return ['active', 'compact']; }
+  constructor() { super(); this.attachShadow({ mode: 'open' }); }
+  connectedCallback() { this.render(); }
+  attributeChangedCallback() { if (this.shadowRoot && this.shadowRoot.querySelector('button')) this.render(); }
+  render() {
+    const isActive = this.hasAttribute('active');
+    const isCompact = this.hasAttribute('compact');
+    this.shadowRoot.innerHTML = `
+      <style>
+        button {
+          background: ${isActive ? '#0284c7' : '#2a2e35'};
+          border: 2px solid ${isActive ? '#38bdf8' : '#434954'};
+          color: ${isActive ? '#ffffff' : '#a0a5b5'};
+          padding: ${isCompact ? '6px 10px' : '8px 14px'};
+          font-family: 'Courier New', Courier, monospace;
+          font-size: ${isCompact ? '10px' : '11px'};
+          font-weight: bold;
+          letter-spacing: 1px;
+          cursor: pointer;
+          border-radius: 4px;
+          box-shadow: 0 2px 4px rgba(0,0,0,0.4)${isActive ? ', 0 0 12px rgba(56,189,248,0.4)' : ''};
+          min-height: 35px;
+          touch-action: manipulation;
+          transition: all 0.15s ease;
+          -webkit-tap-highlight-color: transparent;
+        }
+        button:hover { border-color: ${isActive ? '#38bdf8' : '#566175'}; }
+        button:active { transform: translateY(1px); }
+        button:focus-visible { outline: 2px solid #38bdf8; outline-offset: 2px; }
+      </style>
+      <button aria-pressed="${isActive}"><slot></slot></button>
+    `;
+    this.shadowRoot.querySelector('button').addEventListener('click', () => {
+      this.dispatchEvent(new CustomEvent('audio-click', { bubbles: true, composed: true }));
+    });
+  }
+}
+customElements.define('audio-button', AudioButton);
+
+
+class AudioLed extends HTMLElement {
+  static get observedAttributes() { return ['on']; }
+  constructor() { super(); this.attachShadow({ mode: 'open' }); }
+  connectedCallback() { this.render(); }
+  attributeChangedCallback() { if (this.shadowRoot && this.shadowRoot.querySelector('.led')) this.render(); }
+  render() {
+    const on = this.hasAttribute('on');
+    this.shadowRoot.innerHTML = `
+      <style>
+        .led {
+          width: 8px;
+          height: 8px;
+          border-radius: 50%;
+          background: ${on ? '#22c55e' : '#1a1d21'};
+          box-shadow: ${on ? '0 0 8px #22c55e, inset 0 0 4px #86efac' : 'inset 0 0 4px rgba(0,0,0,0.8)'};
+          border: 1px solid #32373f;
+          transition: all 0.3s ease;
+          flex-shrink: 0;
+        }
+      </style>
+      <div class="led" role="status" aria-label="${on ? 'Активно' : 'Выключено'}"></div>
+    `;
+  }
+}
+customElements.define('audio-led', AudioLed);
+
+
+/* =========================================================================
+   2. МОЛЕКУЛЫ
+   ========================================================================= */
+
+class AudioDisplayParam extends HTMLElement {
+  static get observedAttributes() { return ['value', 'name']; }
+  constructor() { super(); this.attachShadow({ mode: 'open' }); }
+  connectedCallback() { this.render(); }
+  attributeChangedCallback() { if (this.shadowRoot && this.shadowRoot.querySelector('.value')) this.render(); }
+  render() {
+    const name = this.getAttribute('name') || 'PARAM';
+    const value = this.getAttribute('value') || '0%';
+    this.shadowRoot.innerHTML = `
+      <style>
+        .param-box { display: inline-flex; gap: 6px; align-items: baseline; }
+        .label {
+          font-family: 'Courier New', Courier, monospace;
+          font-size: 11px; font-weight: bold; text-transform: uppercase;
+          color: #566175; letter-spacing: 1px;
+        }
+        .value {
+          font-family: 'Courier New', Courier, monospace;
+          font-size: 11px; font-weight: bold;
+          color: #38bdf8; text-shadow: 0 0 6px #38bdf8;
+          letter-spacing: 1px; min-width: 36px;
+          font-variant-numeric: tabular-nums;
+        }
+      </style>
+      <div class="param-box">
+        <span class="label">${name}:</span>
+        <span class="value">${value}</span>
+      </div>
+    `;
+  }
+}
+customElements.define('audio-display-param', AudioDisplayParam);
+
+
+class AudioScaleSelector extends HTMLElement {
+  static get observedAttributes() { return ['active-scale']; }
+  constructor() {
+    super();
+    this.attachShadow({ mode: 'open' });
+    this._active = 'focus';
+  }
+  connectedCallback() { this.render(); this.bindEvents(); }
+  attributeChangedCallback(name, oldVal, newVal) {
+    if (name === 'active-scale' && newVal && this.shadowRoot && this.shadowRoot.querySelector('.mode-btn')) {
+      this._active = newVal;
+      this.updateActive();
+    }
+  }
+  render() {
+    this.shadowRoot.innerHTML = `
+      <style>
+        .selector-box {
+          display: flex; gap: 6px;
+          margin-top: 12px;
+          justify-content: space-between;
+        }
+        .mode-btn {
+          flex: 1;
+          background: #1f2329;
+          border: 1px solid #32373f;
+          color: #566175;
+          font-family: 'Courier New', Courier, monospace;
+          font-size: 10px; font-weight: bold;
+          padding: 8px 4px;
+          cursor: pointer;
+          border-radius: 4px;
+          text-align: center;
+          letter-spacing: 0.5px;
+          transition: all 0.15s ease;
+          touch-action: manipulation;
+          min-height: 32px;
+          -webkit-tap-highlight-color: transparent;
+        }
+        .mode-btn:hover { border-color: #566175; color: #a0a5b5; }
+        .mode-btn.active {
+          color: #38bdf8;
+          border-color: #38bdf8;
+          box-shadow: inset 0 0 4px rgba(56,189,248,0.2), 0 0 8px rgba(56,189,248,0.15);
+          background: #141a20;
+        }
+        .mode-btn:focus-visible { outline: 2px solid #38bdf8; outline-offset: 2px; }
+      </style>
+      <div class="selector-box" role="radiogroup" aria-label="Выбор музыкального лада">
+        <button class="mode-btn" data-scale="focus" role="radio" aria-checked="false">FOCUS</button>
+        <button class="mode-btn" data-scale="deep" role="radio" aria-checked="false">DEEP</button>
+        <button class="mode-btn" data-scale="space" role="radio" aria-checked="false">SPACE</button>
+      </div>
+    `;
+    this.updateActive();
+  }
+  updateActive() {
+    this.shadowRoot.querySelectorAll('.mode-btn').forEach(b => {
+      const isActive = b.dataset.scale === this._active;
+      b.classList.toggle('active', isActive);
+      b.setAttribute('aria-checked', String(isActive));
+      b.setAttribute('tabindex', isActive ? '0' : '-1');
+    });
+  }
+  bindEvents() {
+    this.shadowRoot.querySelectorAll('.mode-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        this._active = btn.dataset.scale;
+        this.updateActive();
+        this.dispatchEvent(new CustomEvent('scale-change', {
+          detail: { scale: this._active },
+          bubbles: true, composed: true
+        }));
+      });
+    });
+  }
+}
+customElements.define('audio-scale-selector', AudioScaleSelector);
+
+
+class AudioVolumeControl extends HTMLElement {
+  static get observedAttributes() { return ['value']; }
+  constructor() { super(); this.attachShadow({ mode: 'open' }); }
+  connectedCallback() { this.render(); this.bindEvents(); }
+  attributeChangedCallback(name, oldVal, newVal) {
+    if (name === 'value' && this.shadowRoot && this.shadowRoot.getElementById('volSlider')) {
+      const v = clamp01(parseOr(newVal, 0.5));
+      const slider = this.shadowRoot.getElementById('volSlider');
+      const display = this.shadowRoot.getElementById('volDisplay');
+      slider.value = String(v);
+      display.textContent = Math.round(v * 100) + '%';
+    }
+  }
+  render() {
+    const val = clamp01(parseOr(this.getAttribute('value'), 0.5));
+    this.shadowRoot.innerHTML = `
+      <style>
+        .vol-box {
+          display: flex; align-items: center; gap: 10px;
+          margin-top: 12px;
+          padding: 8px 10px;
+          background: #0f1012;
+          border: 1px solid #252930;
+          border-radius: 4px;
+        }
+        .label {
+          font-family: 'Courier New', Courier, monospace;
+          font-size: 10px; font-weight: bold; text-transform: uppercase;
+          color: #566175; letter-spacing: 1px;
+        }
+        input[type="range"] {
+          flex: 1;
+          -webkit-appearance: none;
+          appearance: none;
+          height: 4px;
+          background: #1f2329;
+          border-radius: 2px;
+          outline: none;
+          touch-action: manipulation;
+          cursor: pointer;
+        }
+        input[type="range"]::-webkit-slider-thumb {
+          -webkit-appearance: none;
+          appearance: none;
+          width: 18px; height: 18px;
+          background: #38bdf8;
+          border-radius: 50%;
+          cursor: pointer;
+          box-shadow: 0 0 6px #38bdf8;
+          border: none;
+          margin-top: -7px;
+        }
+        input[type="range"]::-moz-range-thumb {
+          width: 18px; height: 18px;
+          background: #38bdf8;
+          border-radius: 50%;
+          cursor: pointer;
+          box-shadow: 0 0 6px #38bdf8;
+          border: none;
+        }
+        input[type="range"]::-webkit-slider-runnable-track {
+          height: 4px; background: #1f2329; border-radius: 2px;
+        }
+        input[type="range"]::-moz-range-track {
+          height: 4px; background: #1f2329; border-radius: 2px;
+        }
+        input[type="range"]:focus-visible { outline: 2px solid #38bdf8; outline-offset: 4px; }
+        .value {
+          font-family: 'Courier New', Courier, monospace;
+          font-size: 11px; font-weight: bold;
+          color: #38bdf8; text-shadow: 0 0 6px #38bdf8;
+          min-width: 38px; text-align: right;
+          font-variant-numeric: tabular-nums;
+        }
+      </style>
+      <div class="vol-box">
+        <span class="label">VOL</span>
+        <input type="range" id="volSlider" min="0" max="1" step="0.01"
+               value="${val}" aria-label="Общая громкость">
+        <span class="value" id="volDisplay">${Math.round(val * 100)}%</span>
+      </div>
+    `;
+  }
+  bindEvents() {
+    const slider = this.shadowRoot.getElementById('volSlider');
+    const display = this.shadowRoot.getElementById('volDisplay');
+    slider.addEventListener('input', (e) => {
+      const v = clamp01(parseFloat(e.target.value));
+      display.textContent = Math.round(v * 100) + '%';
+      this.dispatchEvent(new CustomEvent('volume-change', {
+        detail: { volume: v },
+        bubbles: true, composed: true
+      }));
+    });
+  }
+}
+customElements.define('audio-volume-control', AudioVolumeControl);
+
+
+/* =========================================================================
+   3. ОРГАНИЗМ: XY-PAD
+   ========================================================================= */
+
+class AudioXyPad extends HTMLElement {
+  static get observedAttributes() { return ['x', 'y']; }
+  constructor() {
+    super();
+    this.attachShadow({ mode: 'open' });
+    this._x = 0.5;
+    this._y = 0.5;
+    this._resizeObserver = null;
+  }
+  connectedCallback() {
+    this._x = clamp01(parseOr(this.getAttribute('x'), 0.5));
+    this._y = clamp01(parseOr(this.getAttribute('y'), 0.5));
+    this.render();
+    this.bindEvents();
+
+    // ResizeObserver следит за изменением размеров и пересчитывает позицию прицела
+    if (typeof ResizeObserver !== 'undefined') {
+      this._resizeObserver = new ResizeObserver(() => this.updateFromValues());
+      this._resizeObserver.observe(this.shadowRoot.getElementById('pad'));
+    } else {
+      this._onResize = () => this.updateFromValues();
+      window.addEventListener('resize', this._onResize);
+    }
+    // Первичная установка
+    requestAnimationFrame(() => this.updateFromValues());
+  }
+  disconnectedCallback() {
+    if (this._resizeObserver) this._resizeObserver.disconnect();
+    if (this._onResize) window.removeEventListener('resize', this._onResize);
+  }
+  attributeChangedCallback(name, oldVal, newVal) {
+    if (!this.shadowRoot || !this.shadowRoot.getElementById('pad')) return;
+    if (newVal === null) return;
+    if (name === 'x') this._x = clamp01(parseOr(newVal, 0.5));
+    if (name === 'y') this._y = clamp01(parseOr(newVal, 0.5));
+    this.updateFromValues();
+  }
+  render() {
+    this.shadowRoot.innerHTML = `
+      <style>
+        .pad-container {
+          position: relative;
+          width: 100%;
+          aspect-ratio: 1 / 1;
+          background-color: #0b0c0e;
+          background-image:
+            linear-gradient(rgba(255,255,255,0.03) 1px, transparent 1px),
+            linear-gradient(90deg, rgba(255,255,255,0.03) 1px, transparent 1px);
+          background-size: 20px 20px;
+          border: 2px solid #1f2329;
+          border-radius: 6px;
+          box-shadow: inset 0 4px 12px rgba(0,0,0,0.9);
+          overflow: hidden;
+          cursor: crosshair;
+          touch-action: none;
+          outline: none;
+          -webkit-tap-highlight-color: transparent;
+        }
+        .pad-container:focus-visible {
+          border-color: #38bdf8;
+          box-shadow: inset 0 4px 12px rgba(0,0,0,0.9), 0 0 0 2px rgba(56,189,248,0.4);
+        }
+        .axis-line-x, .axis-line-y {
+          position: absolute;
+          background-color: rgba(56, 189, 248, 0.15);
+          pointer-events: none;
+        }
+        .axis-line-x { width: 100%; height: 1px; left: 0; top: 50%; }
+        .axis-line-y { height: 100%; width: 1px; top: 0; left: 50%; }
+        .pointer {
+          width: 24px; height: 24px;
+          border: 2px solid #38bdf8;
+          border-radius: 50%;
+          position: absolute;
+          top: 50%; left: 50%;
+          transform: translate(-50%, -50%);
+          pointer-events: none;
+          box-shadow: 0 0 8px #38bdf8, inset 0 0 4px #38bdf8;
+          will-change: left, top;
+        }
+        .pointer::after {
+          content: '';
+          position: absolute;
+          width: 6px; height: 6px;
+          background: #38bdf8;
+          border-radius: 50%;
+          top: 50%; left: 50%;
+          transform: translate(-50%, -50%);
+        }
+        .axis-labels {
+          position: absolute;
+          font-family: 'Courier New', Courier, monospace;
+          font-size: 9px;
+          color: #3a4152;
+          text-transform: uppercase;
+          letter-spacing: 1px;
+          pointer-events: none;
+        }
+        .label-x { bottom: 6px; right: 8px; }
+        .label-y { top: 6px; left: 8px; }
+      </style>
+      <div class="pad-container" id="pad" tabindex="0"
+           role="application"
+           aria-label="Управление звуком. Стрелки — точная настройка, Shift — медленнее.">
+        <div class="axis-line-x" id="lineX"></div>
+        <div class="axis-line-y" id="lineY"></div>
+        <div class="pointer" id="pointer"></div>
+        <div class="axis-labels label-x">RATE →</div>
+        <div class="axis-labels label-y">↑ BRIGHT</div>
+      </div>
+    `;
+  }
+  updateFromValues() {
+    const pad = this.shadowRoot && this.shadowRoot.getElementById('pad');
+    if (!pad) return;
+    const rect = pad.getBoundingClientRect();
+    if (rect.width < 1) return;
+    this.updateUI(this._x * rect.width, (1 - this._y) * rect.height);
+  }
+  updateUI(xPx, yPx) {
+    const pointer = this.shadowRoot.getElementById('pointer');
+    const lineX = this.shadowRoot.getElementById('lineX');
+    const lineY = this.shadowRoot.getElementById('lineY');
+    if (pointer) { pointer.style.left = `${xPx}px`; pointer.style.top = `${yPx}px`; }
+    if (lineX) lineX.style.top = `${yPx}px`;
+    if (lineY) lineY.style.left = `${xPx}px`;
+  }
+  setValues(x, y, emit = true) {
+    this._x = clamp01(x);
+    this._y = clamp01(y);
+    this.updateFromValues();
+    if (emit) {
+      this.dispatchEvent(new CustomEvent('pad-change', {
+        detail: { x: this._x, y: this._y },
+        bubbles: true, composed: true
+      }));
+    }
+  }
+  bindEvents() {
+    const pad = this.shadowRoot.getElementById('pad');
+
+    const handleMove = (clientX, clientY) => {
+      const rect = pad.getBoundingClientRect();
+      const x = Math.max(0, Math.min(clientX - rect.left, rect.width));
+      const y = Math.max(0, Math.min(clientY - rect.top, rect.height));
+      this._x = x / rect.width;
+      this._y = 1 - (y / rect.height);
+      this.updateUI(x, y);
+      this.dispatchEvent(new CustomEvent('pad-change', {
+        detail: { x: this._x, y: this._y },
+        bubbles: true, composed: true
+      }));
+    };
+
+    pad.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      pad.focus();
+      try { pad.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+      handleMove(e.clientX, e.clientY);
+      const onMove = (me) => handleMove(me.clientX, me.clientY);
+      const onEnd = () => {
+        pad.removeEventListener('pointermove', onMove);
+        pad.removeEventListener('pointerup', onEnd);
+        pad.removeEventListener('pointercancel', onEnd);
+      };
+      pad.addEventListener('pointermove', onMove);
+      pad.addEventListener('pointerup', onEnd);
+      pad.addEventListener('pointercancel', onEnd);
+    });
+
+    // Доступность: управление с клавиатуры
+    pad.addEventListener('keydown', (e) => {
+      const step = e.shiftKey ? 0.01 : 0.05;
+      let handled = true;
+      switch (e.key) {
+        case 'ArrowLeft':  this.setValues(this._x - step, this._y); break;
+        case 'ArrowRight': this.setValues(this._x + step, this._y); break;
+        case 'ArrowUp':    this.setValues(this._x, this._y + step); break;
+        case 'ArrowDown':  this.setValues(this._x, this._y - step); break;
+        case 'Home':       this.setValues(0, 1); break;
+        case 'End':        this.setValues(1, 0); break;
+        default: handled = false;
+      }
+      if (handled) e.preventDefault();
+    });
+  }
+}
+customElements.define('audio-xy-pad', AudioXyPad);
+
+
+/* =========================================================================
+   4. РЭК: сборка + аудио-движок + сохранение
+   ========================================================================= */
+
+class AmbientSynthRack extends HTMLElement {
+  constructor() {
+    super();
+    this.attachShadow({ mode: 'open' });
+
+    this.STORAGE_KEY = 'ambient_synth_settings_v2';
+
+    this.defaults = Object.freeze({
+      x: 0.5,
+      y: 0.5,
+      scaleMode: 'focus',
+      volume: 0.5
+    });
+
+    this.state = { ...this.defaults };
+
+    this.scales = {
+      // C Major Pentatonic — нейтральный, "рабочий" лад
+      focus: [130.81, 146.83, 164.81, 196.00, 220.00, 261.63, 293.66, 329.63, 392.00, 440.00],
+      // A# Minor Pentatonic — глубже, для ночной работы
+      deep:  [116.54, 138.59, 155.56, 174.61, 207.65, 233.08, 277.18, 311.13, 349.23, 415.30],
+      // C Lydian — "космический", для креативных задач
+      space: [130.81, 146.83, 164.81, 185.00, 196.00, 220.00, 261.63, 293.66, 329.63, 370.00]
+    };
+
+    this.isPlaying = false;
+    this.audioCtx = null;
+    this.timerId = null;
+    this._debounceTimeout = null;
+    this._activeOscillators = new Set();
+
+    this.loadSettings();
+    this.currentScale = this.scales[this.state.scaleMode] || this.scales.focus;
+  }
+
+  /* ---------- Сохранение / загрузка ---------- */
+
+  loadSettings() {
+    try {
+      const saved = localStorage.getItem(this.STORAGE_KEY);
+      if (!saved) return;
+      const parsed = JSON.parse(saved);
+      // Слияние с дефолтами: если в localStorage старая/неполная схема — добьём
+      this.state = { ...this.defaults, ...parsed };
+      // Валидация
+      if (!this.scales[this.state.scaleMode]) this.state.scaleMode = this.defaults.scaleMode;
+      this.state.x = clamp01(parseOr(this.state.x, this.defaults.x));
+      this.state.y = clamp01(parseOr(this.state.y, this.defaults.y));
+      this.state.volume = clamp01(parseOr(this.state.volume, this.defaults.volume));
+    } catch (e) {
+      console.warn('Не удалось загрузить настройки:', e);
+      this.state = { ...this.defaults };
+    }
+  }
+
+  saveSettings() {
+    if (this._debounceTimeout) clearTimeout(this._debounceTimeout);
+    this._debounceTimeout = setTimeout(() => this.saveSettingsNow(), 250);
+  }
+
+  saveSettingsNow() {
+    if (this._debounceTimeout) { clearTimeout(this._debounceTimeout); this._debounceTimeout = null; }
+    try {
+      localStorage.setItem(this.STORAGE_KEY, JSON.stringify(this.state));
+    } catch (e) {
+      // localStorage может быть недоступен в приватном режиме — молча игнорируем
+    }
+  }
+
+  resetSettings() {
+    this.state = { ...this.defaults };
+    this.currentScale = this.scales[this.state.scaleMode];
+
+    const pad = this.shadowRoot.getElementById('synthPad');
+    pad.setAttribute('x', String(this.state.x));
+    pad.setAttribute('y', String(this.state.y));
+    pad.setValues(this.state.x, this.state.y, false);
+
+    this.shadowRoot.getElementById('dispX').setAttribute('value', Math.round(this.state.x * 100) + '%');
+    this.shadowRoot.getElementById('dispY').setAttribute('value', Math.round(this.state.y * 100) + '%');
+
+    this.shadowRoot.getElementById('scaleSelector').setAttribute('active-scale', this.state.scaleMode);
+    this.shadowRoot.getElementById('volumeControl').setAttribute('value', String(this.state.volume));
+
+    this.applyAudioParams();
+    this.applyVolume();
+    this.saveSettingsNow();
+  }
+
+  /* ---------- Жизненный цикл ---------- */
+
+  connectedCallback() {
+    this.render();
+    this.bindEvents();
+
+    this._onVisibility = () => {
+      if (document.visibilityState === 'hidden') this.saveSettingsNow();
+    };
+    this._onBeforeUnload = () => this.saveSettingsNow();
+    document.addEventListener('visibilitychange', this._onVisibility);
+    window.addEventListener('beforeunload', this._onBeforeUnload);
+    window.addEventListener('pagehide', this._onBeforeUnload);
+  }
+
+  disconnectedCallback() {
+    document.removeEventListener('visibilitychange', this._onVisibility);
+    window.removeEventListener('beforeunload', this._onBeforeUnload);
+    window.removeEventListener('pagehide', this._onBeforeUnload);
+    this.stopScheduler();
+    if (this.audioCtx && this.audioCtx.state !== 'closed') {
+      this.audioCtx.close().catch(() => {});
+      this.audioCtx = null;
+    }
+  }
+
+  render() {
+    this.shadowRoot.innerHTML = `
+      <style>
+        :host { display: block; width: 100%; max-width: 340px; }
+        .rack-unit {
+          background: linear-gradient(135deg, #22252a 0%, #17191d 100%);
+          border: 3px solid #32373f;
+          border-radius: 8px;
+          padding: 20px;
+          box-shadow: 0 20px 40px rgba(0,0,0,0.7), inset 0 1px 0 rgba(255,255,255,0.05);
+          width: 100%;
+          box-sizing: border-box;
+          user-select: none;
+          -webkit-user-select: none;
+        }
+        .header {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          margin-bottom: 16px;
+          border-bottom: 2px dashed #32373f;
+          padding-bottom: 12px;
+          gap: 8px;
+        }
+        .title-wrap {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          min-width: 0;
+        }
+        .title {
+          font-family: 'Courier New', Courier, monospace;
+          font-size: 12px;
+          font-weight: bold;
+          letter-spacing: 1.5px;
+          color: #e0e5f0;
+          text-transform: uppercase;
+          text-shadow: 0 0 4px rgba(255,255,255,0.1);
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+        .controls-row { display: flex; gap: 6px; align-items: center; flex-shrink: 0; }
+        .display-grid {
+          margin-top: 14px;
+          background: #0f1012;
+          border: 1px solid #252930;
+          border-radius: 4px;
+          padding: 10px;
+          display: flex;
+          justify-content: space-between;
+          box-shadow: inset 0 2px 4px rgba(0,0,0,0.5);
+        }
+        .hint {
+          margin-top: 12px;
+          font-family: 'Courier New', Courier, monospace;
+          font-size: 9px;
+          color: #3a4152;
+          text-align: center;
+          letter-spacing: 0.4px;
+          line-height: 1.4;
+        }
+        @media (max-width: 360px) {
+          .rack-unit { padding: 14px; }
+          .title { font-size: 11px; letter-spacing: 1px; }
+        }
+      </style>
+
+      <div class="rack-unit">
+        <div class="header">
+          <div class="title-wrap">
+            <audio-led id="powerLed"></audio-led>
+            <div class="title">Ambient Focus</div>
+          </div>
+          <div class="controls-row">
+            <audio-button id="resetBtn" compact title="Сброс к настройкам по умолчанию">RESET</audio-button>
+            <audio-button id="powerBtn">POWER</audio-button>
+          </div>
+        </div>
+
+        <audio-xy-pad id="synthPad" x="${this.state.x}" y="${this.state.y}"></audio-xy-pad>
+
+        <audio-scale-selector id="scaleSelector" active-scale="${this.state.scaleMode}"></audio-scale-selector>
+
+        <audio-volume-control id="volumeControl" value="${this.state.volume}"></audio-volume-control>
+
+        <div class="display-grid">
+          <audio-display-param id="dispX" name="RATE" value="${Math.round(this.state.x * 100)}%"></audio-display-param>
+          <audio-display-param id="dispY" name="BRIGHT" value="${Math.round(this.state.y * 100)}%"></audio-display-param>
+        </div>
+
+        <div class="hint">PAD: ← → темп · ↑ ↓ яркость · Shift — точнее</div>
+      </div>
+    `;
+  }
+
+  bindEvents() {
+    const powerBtn    = this.shadowRoot.getElementById('powerBtn');
+    const resetBtn    = this.shadowRoot.getElementById('resetBtn');
+    const synthPad    = this.shadowRoot.getElementById('synthPad');
+    const scaleSel    = this.shadowRoot.getElementById('scaleSelector');
+    const volumeCtrl  = this.shadowRoot.getElementById('volumeControl');
+
+    powerBtn.addEventListener('audio-click', () => this.togglePower());
+    resetBtn.addEventListener('audio-click', () => this.resetSettings());
+
+    synthPad.addEventListener('pad-change', (e) => {
+      this.state.x = e.detail.x;
+      this.state.y = e.detail.y;
+      this.shadowRoot.getElementById('dispX').setAttribute('value', Math.round(this.state.x * 100) + '%');
+      this.shadowRoot.getElementById('dispY').setAttribute('value', Math.round(this.state.y * 100) + '%');
+      this.applyAudioParams();
+      this.saveSettings();
+    });
+
+    scaleSel.addEventListener('scale-change', (e) => {
+      this.state.scaleMode = e.detail.scale;
+      this.currentScale = this.scales[this.state.scaleMode] || this.scales.focus;
+      this.saveSettings();
+    });
+
+    volumeCtrl.addEventListener('volume-change', (e) => {
+      this.state.volume = e.detail.volume;
+      this.applyVolume();
+      this.saveSettings();
+    });
+  }
+
+  /* ---------- Питание ---------- */
+
+  async togglePower() {
+    const powerBtn = this.shadowRoot.getElementById('powerBtn');
+    const powerLed = this.shadowRoot.getElementById('powerLed');
+
+    if (!this.isPlaying) {
+      if (!this.audioCtx) this.initAudio();
+      if (this.audioCtx.state === 'suspended') {
+        try { await this.audioCtx.resume(); } catch (e) { /* ignore */ }
+      }
+      this.isPlaying = true;
+      powerBtn.setAttribute('active', '');
+      powerBtn.textContent = 'ACTIVE';
+      powerLed.setAttribute('on', '');
+
+      // Плавный подъём общей громкости (powerGain — общий on/off)
+      const now = this.audioCtx.currentTime;
+      this.powerGain.gain.cancelScheduledValues(now);
+      this.powerGain.gain.setValueAtTime(this.powerGain.gain.value, now);
+      this.powerGain.gain.linearRampToValueAtTime(1, now + 0.6);
+
+      this.startScheduler();
+    } else {
+      this.isPlaying = false;
+      powerBtn.removeAttribute('active');
+      powerBtn.textContent = 'POWER';
+      powerLed.removeAttribute('on');
+
+      // Плавное затухание всей звуковой цепочки: шум, ноты, хвосты эха
+      if (this.audioCtx && this.audioCtx.state !== 'closed') {
+        const now = this.audioCtx.currentTime;
+        this.powerGain.gain.cancelScheduledValues(now);
+        this.powerGain.gain.setValueAtTime(this.powerGain.gain.value, now);
+        this.powerGain.gain.linearRampToValueAtTime(0, now + 0.8);
+      }
+      this.stopScheduler();
+    }
+  }
+
+  /* ---------- Аудио-движок ---------- */
+
+  initAudio() {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    this.audioCtx = new Ctx();
+
+    // --- Финальный on/off (всё проходит через него) ---
+    this.powerGain = this.audioCtx.createGain();
+    this.powerGain.gain.value = 0; // стартуем тихо, поднимем при power on
+    this.powerGain.connect(this.audioCtx.destination);
+
+    // --- Общая громкость ---
+    this.masterGain = this.audioCtx.createGain();
+    this.masterGain.gain.value = this.state.volume;
+    this.masterGain.connect(this.powerGain);
+
+    // --- Фильтр тонов ---
+    this.filterNode = this.audioCtx.createBiquadFilter();
+    this.filterNode.type = 'lowpass';
+    this.filterNode.frequency.value = 600;
+    this.filterNode.Q.value = 0.7;
+    this.filterNode.connect(this.masterGain);
+
+    // --- Петля задержки (эхо) с низкочастотным фильтром в обратной связи ---
+    this.delayNode = this.audioCtx.createDelay(2.0);
+    this.delayNode.delayTime.value = 0.7;
+
+    this.delayFilter = this.audioCtx.createBiquadFilter();
+    this.delayFilter.type = 'lowpass';
+    this.delayFilter.frequency.value = 1200;
+
+    this.delayGain = this.audioCtx.createGain();
+    this.delayGain.gain.value = 0.4;
+
+    this.filterNode.connect(this.delayNode);
+    this.delayNode.connect(this.delayFilter);
+    this.delayFilter.connect(this.delayGain);
+    this.delayGain.connect(this.filterNode); // обратная связь
+
+    // --- Розовый шум (атмосфера дождя/водопада) ---
+    this.initNoise();
+
+    this.applyAudioParams();
+    this.applyVolume();
+  }
+
+  initNoise() {
+    const seconds = 4;
+    const bufferSize = seconds * this.audioCtx.sampleRate;
+    const noiseBuffer = this.audioCtx.createBuffer(1, bufferSize, this.audioCtx.sampleRate);
+    const output = noiseBuffer.getChannelData(0);
+
+    // Алгоритм Пола Келлетта для розового шума
+    let b0 = 0, b1 = 0, b2 = 0, b3 = 0, b4 = 0, b5 = 0, b6 = 0;
+    for (let i = 0; i < bufferSize; i++) {
+      const white = Math.random() * 2 - 1;
+      b0 = 0.99886 * b0 + white * 0.0555179;
+      b1 = 0.99332 * b1 + white * 0.0750759;
+      b2 = 0.96900 * b2 + white * 0.1538520;
+      b3 = 0.86650 * b3 + white * 0.3104856;
+      b4 = 0.55000 * b4 + white * 0.5329522;
+      b5 = -0.7616 * b5 - white * 0.0168980;
+      output[i] = (b0 + b1 + b2 + b3 + b4 + b5 + b6 + white * 0.5362) * 0.11;
+      b6 = white * 0.115926;
+    }
+
+    this.noiseSource = this.audioCtx.createBufferSource();
+    this.noiseSource.buffer = noiseBuffer;
+    this.noiseSource.loop = true;
+
+    this.noiseFilter = this.audioCtx.createBiquadFilter();
+    this.noiseFilter.type = 'lowpass';
+    this.noiseFilter.frequency.value = 400;
+
+    this.noiseGain = this.audioCtx.createGain();
+    this.noiseGain.gain.value = 0; // старт — тишина, applyAudioParams задаст цель
+
+    this.noiseSource.connect(this.noiseFilter);
+    this.noiseFilter.connect(this.noiseGain);
+    this.noiseGain.connect(this.masterGain);
+
+    this.noiseSource.start(0);
+  }
+
+  applyVolume() {
+    if (!this.audioCtx || !this.masterGain) return;
+    const now = this.audioCtx.currentTime;
+    this.masterGain.gain.setTargetAtTime(this.state.volume, now, 0.05);
+  }
+
+  applyAudioParams() {
+    if (!this.audioCtx || this.audioCtx.state === 'closed') return;
+    const now = this.audioCtx.currentTime;
+
+    // Y → яркость фильтра (логарифмическая шкала: 220…1600 Гц)
+    const minFreq = 220, maxFreq = 1600;
+    const targetFreq = minFreq * Math.pow(maxFreq / minFreq, this.state.y);
+    this.filterNode.frequency.setTargetAtTime(targetFreq, now, 0.05);
+
+    // Y → глубина эха (с ростом яркости — более выраженное пространство)
+    this.delayGain.gain.setTargetAtTime(0.2 + this.state.y * 0.45, now, 0.1);
+
+    // X → громкость шума (от 0.02 до 0.16)
+    const targetNoise = 0.02 + this.state.x * 0.14;
+    this.noiseGain.gain.setTargetAtTime(targetNoise, now, 0.2);
+  }
+
+  /* ---------- Генеративный планировщик ---------- */
+
+  startScheduler() {
+    const playNext = () => {
+      if (!this.isPlaying) return;
+      this.triggerNote();
+
+      // X → плотность нот: 3200 мс (редко) → 400 мс (часто)
+      const minInterval = 400, maxInterval = 3200;
+      const base = maxInterval - this.state.x * (maxInterval - minInterval);
+      const chaos = (Math.random() - 0.5) * base * 0.15;
+      const nextDelay = Math.max(180, base + chaos);
+
+      this.timerId = setTimeout(playNext, nextDelay);
+    };
+    playNext();
+  }
+
+  stopScheduler() {
+    if (this.timerId) { clearTimeout(this.timerId); this.timerId = null; }
+  }
+
+  triggerNote() {
+    if (!this.audioCtx || this.audioCtx.state === 'closed') return;
+    const now = this.audioCtx.currentTime;
+    const scale = this.currentScale;
+    const freq = scale[Math.floor(Math.random() * scale.length)];
+
+    const osc = this.audioCtx.createOscillator();
+    const oscGain = this.audioCtx.createGain();
+
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(freq, now);
+
+    oscGain.gain.setValueAtTime(0, now);
+    const attack = 0.8 + Math.random() * 0.6;
+    const release = 4.0 + Math.random() * 3.0;
+    const peak = 0.18;
+
+    oscGain.gain.linearRampToValueAtTime(peak, now + attack);
+    oscGain.gain.exponentialRampToValueAtTime(0.001, now + attack + release);
+
+    osc.connect(oscGain);
+    oscGain.connect(this.filterNode);
+    osc.start(now);
+    osc.stop(now + attack + release + 0.1);
+
+    // Учёт активных осцилляторов для корректного освобождения
+    this._activeOscillators.add(osc);
+    osc.onended = () => {
+      this._activeOscillators.delete(osc);
+      try { osc.disconnect(); oscGain.disconnect(); } catch (e) { /* ignore */ }
+    };
+  }
+}
+customElements.define('ambient-synth-rack', AmbientSynthRack);
+</script>
+
+</body>
+</html>
