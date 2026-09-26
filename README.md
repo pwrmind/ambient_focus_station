@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <a href="https://pwrmind.github.io/ambient-focus-station/"><strong>▶ Открыть демо</strong></a>
+  <a href="https://pwrmind.github.io/ambient_focus_station/"><strong>▶ Открыть демо</strong></a>
 </p>
 
 ---
