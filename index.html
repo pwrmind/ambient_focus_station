@@ -1287,4 +1287,104 @@ class AmbientSynthRack extends HTMLElement {
     this.lfo1DroneGain.gain.setTargetAtTime(lfoLevel, now, 0.5);
   }
 
-  /* --------- Основные параметры (
+  /* --------- Основные параметры (MAIN пад) --------- */
+  applyAudioParams() {
+    if (!this.audioCtx || this.audioCtx.state === 'closed') return;
+    const now = this.audioCtx.currentTime;
+
+    const toneMin = 350, toneMax = 2200;
+    const toneTarget = toneMin * Math.pow(toneMax / toneMin, this.state.y);
+    this.toneFilter.frequency.setTargetAtTime(toneTarget, now, 0.08);
+
+    this.reverbWet.gain.setTargetAtTime(0.30 + this.state.y * 0.35, now, 0.15);
+    this.delayWet.gain.setTargetAtTime(0.15 + this.state.y * 0.25, now, 0.15);
+
+    const noiseTarget = 0.05 + this.state.x * 0.25;
+    this.noiseGain.gain.setTargetAtTime(noiseTarget, now, 0.25);
+
+    const noiseMin = 500, noiseMax = 3000;
+    const noiseFreqBase = noiseMin * Math.pow(noiseMax / noiseMin, this.state.y);
+    this.noiseFilter.frequency.setTargetAtTime(noiseFreqBase, now, 0.12);
+  }
+
+  /* --------- Параметры COLOR пада --------- */
+  applyColorParams() {
+    if (!this.audioCtx || this.audioCtx.state === 'closed') return;
+
+    // WIDTH
+    this.setWidth(clamp(this.width, 0, 1.5));
+
+    // WARMTH
+    const now = this.audioCtx.currentTime;
+    const w = this.warmth;
+    this.warmthDryGain.gain.setTargetAtTime(1 - w, now, 0.05);
+    this.warmthWetGain.gain.setTargetAtTime(w * 0.65, now, 0.05);
+  }
+
+  /* --------- Генеративный планировщик --------- */
+
+  startScheduler() {
+    const playNext = () => {
+      if (!this.isPlaying) return;
+      this.triggerNote();
+      const minInterval = 350, maxInterval = 3800;
+      const base = maxInterval - this.state.x * (maxInterval - minInterval);
+      const chaos = (Math.random() - 0.5) * base * 0.18;
+      this.timerId = setTimeout(playNext, Math.max(160, base + chaos));
+    };
+    playNext();
+  }
+  stopScheduler() { if (this.timerId) { clearTimeout(this.timerId); this.timerId = null; } }
+
+  triggerNote() {
+    if (!this.audioCtx || this.audioCtx.state === 'closed') return;
+    const now = this.audioCtx.currentTime;
+    const scale = this.currentScale;
+
+    const voiceCount = Math.random() < 0.25 ? 2 : 1;
+    const chosen = new Set();
+    let attempts = 0;
+    while (chosen.size < voiceCount && attempts < 8) {
+      chosen.add(Math.floor(Math.random() * scale.length));
+      attempts++;
+    }
+
+    chosen.forEach((idx, i) => {
+      const freq = scale[idx];
+      const detune = i === 0 ? 0 : (Math.random() - 0.5) * 12;
+      this.playVoice(freq, detune, now + i * 0.04);
+    });
+  }
+
+  playVoice(freq, detuneCents, startTime) {
+    const ctx = this.audioCtx;
+    const osc = ctx.createOscillator();
+    const oscGain = ctx.createGain();
+
+    osc.type = Math.random() < 0.7 ? 'triangle' : 'sine';
+    osc.frequency.setValueAtTime(freq, startTime);
+    osc.detune.setValueAtTime(detuneCents, startTime);
+
+    oscGain.gain.setValueAtTime(0, startTime);
+    const attack = 0.8 + Math.random() * 0.8;
+    const release = 4.5 + Math.random() * 3.5;
+    const peak = 0.16;
+
+    oscGain.gain.linearRampToValueAtTime(peak, startTime + attack);
+    oscGain.gain.exponentialRampToValueAtTime(0.001, startTime + attack + release);
+
+    osc.connect(oscGain);
+    oscGain.connect(this.toneFilter);
+    osc.start(startTime);
+    osc.stop(startTime + attack + release + 0.15);
+
+    osc.onended = () => {
+      try { osc.disconnect(); oscGain.disconnect(); } catch (e) {}
+    };
+  }
+}
+customElements.define('ambient-synth-rack', AmbientSynthRack);
+</script>
+
+</body>
+</html>
