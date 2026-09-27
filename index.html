@@ -989,85 +989,93 @@ class AmbientSynthRack extends HTMLElement {
      ======================================================================= */
 
   async initAudio() {
-    const Ctx = window.AudioContext || window.webkitAudioContext;
-    this.audioCtx = new Ctx();
-    const ctx = this.audioCtx;
+  const Ctx = window.AudioContext || window.webkitAudioContext;
+  this.audioCtx = new Ctx();
+  const ctx = this.audioCtx;
 
-    // --- Финальный on/off ---
-    this.powerGain = ctx.createGain();
-    this.powerGain.gain.value = 0;
-    this.powerGain.connect(ctx.destination);
+  // --- Финальный on/off ---
+  this.powerGain = ctx.createGain();
+  this.powerGain.gain.value = 0;
+  this.powerGain.connect(ctx.destination);
 
-    // --- Мастер-громкость ---
-    this.masterGain = ctx.createGain();
-    this.masterGain.gain.value = this.state.volume;
-    this.masterGain.connect(this.powerGain);
+  // --- Мастер-громкость ---
+  this.masterGain = ctx.createGain();
+  this.masterGain.gain.value = this.state.volume;
+  this.masterGain.connect(this.powerGain);
 
-    // --- Шина ширины стерео (M/S матрица) ---
-    const widthOutput = this.initWidthMatrix();
-    widthOutput.connect(this.masterGain);
+  // --- 1. Создаём M/S-матрицу ширины ---
+  // После вызова доступны: this.widthInput, this.widthMerger
+  this.initWidthMatrix();
 
-    // --- Сатурация (WARMTH) ---
-    this.initWarmth(widthOutput);
+  // Выход матрицы ширины идёт в мастер
+  this.widthMerger.connect(this.masterGain);
 
-    // --- Pre-mix шина: всё приходит сюда ---
-    this.preMixGain = ctx.createGain();
-    this.preMixGain.gain.value = 1;
-    this.preMixGain.connect(this.warmthInput);
+  // --- 2. Сатурация: её выход идёт во ВХОД матрицы ширины ---
+  // (вот здесь была ошибка — раньше сюда передавался widthMerger)
+  this.initWarmth(this.widthInput);
 
-    // --- Шина нот ---
-    this.notesBus = ctx.createGain();
-    this.notesBus.gain.value = 1;
+  // --- 3. Pre-mix шина: всё сходится сюда и идёт в warmth ---
+  this.preMixGain = ctx.createGain();
+  this.preMixGain.gain.value = 1;
+  this.preMixGain.connect(this.warmthInput);
 
-    this.dryGain = ctx.createGain();
-    this.dryGain.gain.value = 0.75;
-    this.notesBus.connect(this.dryGain);
-    this.dryGain.connect(this.preMixGain);
+  // =====================================================================
+  // Дальше — БЕЗ ИЗМЕНЕНИЙ (ноты, реверб, эхо, дрон, шум, LFO)
+  // =====================================================================
 
-    this.convolver = ctx.createConvolver();
-    this.convolver.buffer = createReverbIR(ctx, 3.5, 2.2);
-    this.reverbWet = ctx.createGain();
-    this.reverbWet.gain.value = 0.45;
-    this.notesBus.connect(this.convolver);
-    this.convolver.connect(this.reverbWet);
-    this.reverbWet.connect(this.preMixGain);
+  // --- Шина нот ---
+  this.notesBus = ctx.createGain();
+  this.notesBus.gain.value = 1;
 
-    this.delayNode = ctx.createDelay(2.0);
-    this.delayNode.delayTime.value = 0.65;
-    this.delayFilter = ctx.createBiquadFilter();
-    this.delayFilter.type = 'lowpass';
-    this.delayFilter.frequency.value = 1400;
-    this.delayFeedback = ctx.createGain();
-    this.delayFeedback.gain.value = 0.42;
-    this.delayWet = ctx.createGain();
-    this.delayWet.gain.value = 0.25;
-    this.notesBus.connect(this.delayNode);
-    this.delayNode.connect(this.delayFilter);
-    this.delayFilter.connect(this.delayFeedback);
-    this.delayFeedback.connect(this.delayNode);
-    this.delayFilter.connect(this.delayWet);
-    this.delayWet.connect(this.preMixGain);
+  this.dryGain = ctx.createGain();
+  this.dryGain.gain.value = 0.75;
+  this.notesBus.connect(this.dryGain);
+  this.dryGain.connect(this.preMixGain);
 
-    this.toneFilter = ctx.createBiquadFilter();
-    this.toneFilter.type = 'lowpass';
-    this.toneFilter.frequency.value = 900;
-    this.toneFilter.Q.value = 0.7;
-    this.toneFilter.connect(this.notesBus);
+  this.convolver = ctx.createConvolver();
+  this.convolver.buffer = createReverbIR(ctx, 3.5, 2.2);
+  this.reverbWet = ctx.createGain();
+  this.reverbWet.gain.value = 0.45;
+  this.notesBus.connect(this.convolver);
+  this.convolver.connect(this.reverbWet);
+  this.reverbWet.connect(this.preMixGain);
 
-    // --- Дрон ---
-    this.initDrone();
+  this.delayNode = ctx.createDelay(2.0);
+  this.delayNode.delayTime.value = 0.65;
+  this.delayFilter = ctx.createBiquadFilter();
+  this.delayFilter.type = 'lowpass';
+  this.delayFilter.frequency.value = 1400;
+  this.delayFeedback = ctx.createGain();
+  this.delayFeedback.gain.value = 0.42;
+  this.delayWet = ctx.createGain();
+  this.delayWet.gain.value = 0.25;
+  this.notesBus.connect(this.delayNode);
+  this.delayNode.connect(this.delayFilter);
+  this.delayFilter.connect(this.delayFeedback);
+  this.delayFeedback.connect(this.delayNode);
+  this.delayFilter.connect(this.delayWet);
+  this.delayWet.connect(this.preMixGain);
 
-    // --- Шум (AudioWorklet или буферный fallback) ---
-    await this.initNoise();
+  this.toneFilter = ctx.createBiquadFilter();
+  this.toneFilter.type = 'lowpass';
+  this.toneFilter.frequency.value = 900;
+  this.toneFilter.Q.value = 0.7;
+  this.toneFilter.connect(this.notesBus);
 
-    // --- LFO ---
-    this.initLFOs();
+  // --- Дрон ---
+  this.initDrone();
 
-    this.applyAudioParams();
-    this.applyColorParams();
-    this.applyVolume();
-    this.applyDroneState();
-  }
+  // --- Шум (AudioWorklet или буферный fallback) ---
+  await this.initNoise();
+
+  // --- LFO ---
+  this.initLFOs();
+
+  this.applyAudioParams();
+  this.applyColorParams();
+  this.applyVolume();
+  this.applyDroneState();
+}
 
   /* --------- WIDTH: M/S матрица ---------
      L' = a·L + b·R
