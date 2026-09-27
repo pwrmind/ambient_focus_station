@@ -25,6 +25,7 @@
    ========================================================================= */
 const parseOr = (v, fb) => { const n = parseFloat(v); return isNaN(n) ? fb : n; };
 const clamp01 = (v) => Math.max(0, Math.min(1, v));
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
 function createReverbIR(ctx, durationSec, decay) {
   const rate = ctx.sampleRate;
@@ -37,6 +38,77 @@ function createReverbIR(ctx, durationSec, decay) {
     }
   }
   return impulse;
+}
+
+/* Исходник AudioWorklet-процессора. Собирается в Blob URL при инициализации. */
+const PINK_NOISE_WORKLET_SRC = `
+class PinkNoiseProcessor extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this.b0 = 0; this.b1 = 0; this.b2 = 0; this.b3 = 0;
+    this.b4 = 0; this.b5 = 0; this.b6 = 0;
+  }
+  process(inputs, outputs) {
+    const out = outputs[0][0];
+    for (let i = 0; i < out.length; i++) {
+      const white = Math.random() * 2 - 1;
+      this.b0 = 0.99886 * this.b0 + white * 0.0555179;
+      this.b1 = 0.99332 * this.b1 + white * 0.0750759;
+      this.b2 = 0.96900 * this.b2 + white * 0.1538520;
+      this.b3 = 0.86650 * this.b3 + white * 0.3104856;
+      this.b4 = 0.55000 * this.b4 + white * 0.5329522;
+      this.b5 = -0.7616 * this.b5 - white * 0.0168980;
+      out[i] = (this.b0 + this.b1 + this.b2 + this.b3 + this.b4 + this.b5 + this.b6 + white * 0.5362) * 0.11;
+      this.b6 = white * 0.115926;
+    }
+    return true;
+  }
+}
+registerProcessor('pink-noise-processor', PinkNoiseProcessor);
+`;
+
+/* Создаёт источник шума: AudioWorklet, или буферный fallback. */
+async function createNoiseSource(ctx) {
+  if (ctx.audioWorklet && typeof AudioWorkletNode !== 'undefined') {
+    try {
+      const blob = new Blob([PINK_NOISE_WORKLET_SRC], { type: 'application/javascript' });
+      const url = URL.createObjectURL(blob);
+      await ctx.audioWorklet.addModule(url);
+      URL.revokeObjectURL(url);
+      const node = new AudioWorkletNode(ctx, 'pink-noise-processor', {
+        numberOfInputs: 0,
+        numberOfOutputs: 1,
+        outputChannelCount: [1]
+      });
+      node._kind = 'worklet';
+      return node;
+    } catch (e) {
+      console.warn('AudioWorklet не запустился, использую буферный fallback:', e);
+    }
+  }
+  // Fallback: 4-секундный буфер, зацикленный
+  const seconds = 4;
+  const bufferSize = seconds * ctx.sampleRate;
+  const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+  const data = buffer.getChannelData(0);
+  let b0=0,b1=0,b2=0,b3=0,b4=0,b5=0,b6=0;
+  for (let i = 0; i < bufferSize; i++) {
+    const white = Math.random() * 2 - 1;
+    b0 = 0.99886 * b0 + white * 0.0555179;
+    b1 = 0.99332 * b1 + white * 0.0750759;
+    b2 = 0.96900 * b2 + white * 0.1538520;
+    b3 = 0.86650 * b3 + white * 0.3104856;
+    b4 = 0.55000 * b4 + white * 0.5329522;
+    b5 = -0.7616 * b5 - white * 0.0168980;
+    data[i] = (b0 + b1 + b2 + b3 + b4 + b5 + b6 + white * 0.5362) * 0.11;
+    b6 = white * 0.115926;
+  }
+  const src = ctx.createBufferSource();
+  src.buffer = buffer;
+  src.loop = true;
+  src.start(0);
+  src._kind = 'buffer';
+  return src;
 }
 
 /* =========================================================================
@@ -147,19 +219,19 @@ class AudioDisplayParam extends HTMLElement {
         .param-box { display: inline-flex; gap: 6px; align-items: baseline; }
         .label {
           font-family: 'Courier New', Courier, monospace;
-          font-size: 11px; font-weight: bold; text-transform: uppercase;
+          font-size: 10px; font-weight: bold; text-transform: uppercase;
           color: #566175; letter-spacing: 1px;
         }
         .value {
           font-family: 'Courier New', Courier, monospace;
-          font-size: 11px; font-weight: bold;
+          font-size: 10px; font-weight: bold;
           color: #38bdf8; text-shadow: 0 0 6px #38bdf8;
-          letter-spacing: 1px; min-width: 36px;
+          letter-spacing: 1px; min-width: 34px;
           font-variant-numeric: tabular-nums;
         }
       </style>
       <div class="param-box">
-        <span class="label">${name}:</span>
+        <span class="label">${name}</span>
         <span class="value">${value}</span>
       </div>
     `;
@@ -186,14 +258,14 @@ class AudioScaleSelector extends HTMLElement {
     this.shadowRoot.innerHTML = `
       <style>
         :host { display: block; flex: 0 0 auto; }
-        .selector-box { display: flex; gap: 6px; margin-top: 10px; justify-content: space-between; }
+        .selector-box { display: flex; gap: 6px; margin-top: 8px; justify-content: space-between; }
         .mode-btn {
           flex: 1; background: #1f2329; border: 1px solid #32373f;
           color: #566175; font-family: 'Courier New', Courier, monospace;
-          font-size: 10px; font-weight: bold; padding: 8px 4px;
+          font-size: 10px; font-weight: bold; padding: 7px 4px;
           cursor: pointer; border-radius: 4px; text-align: center;
           letter-spacing: 0.5px; transition: all 0.15s ease;
-          touch-action: manipulation; min-height: 32px;
+          touch-action: manipulation; min-height: 30px;
           -webkit-tap-highlight-color: transparent;
         }
         .mode-btn:hover { border-color: #566175; color: #a0a5b5; }
@@ -204,7 +276,7 @@ class AudioScaleSelector extends HTMLElement {
         }
         .mode-btn:focus-visible { outline: 2px solid #38bdf8; outline-offset: 2px; }
       </style>
-      <div class="selector-box" role="radiogroup" aria-label="Выбор музыкального лада">
+      <div class="selector-box" role="radiogroup" aria-label="Музыкальный лад">
         <button class="mode-btn" data-scale="focus" role="radio" aria-checked="false">FOCUS</button>
         <button class="mode-btn" data-scale="deep"  role="radio" aria-checked="false">DEEP</button>
         <button class="mode-btn" data-scale="space" role="radio" aria-checked="false">SPACE</button>
@@ -253,7 +325,7 @@ class AudioVolumeControl extends HTMLElement {
         :host { display: block; flex: 0 0 auto; }
         .vol-box {
           display: flex; align-items: center; gap: 10px;
-          margin-top: 10px; padding: 8px 10px;
+          margin-top: 8px; padding: 7px 10px;
           background: #0f1012; border: 1px solid #252930; border-radius: 4px;
         }
         .label {
@@ -311,11 +383,11 @@ customElements.define('audio-volume-control', AudioVolumeControl);
 
 
 /* =========================================================================
-   3. ОРГАНИЗМ: XY-PAD  (теперь адаптивный по обеим осям)
+   3. ОРГАНИЗМ: XY-PAD (с поддержкой кастомного акцента и подписей осей)
    ========================================================================= */
 
 class AudioXyPad extends HTMLElement {
-  static get observedAttributes() { return ['x', 'y']; }
+  static get observedAttributes() { return ['x', 'y', 'label-x', 'label-y']; }
   constructor() {
     super();
     this.attachShadow({ mode: 'open' });
@@ -346,9 +418,12 @@ class AudioXyPad extends HTMLElement {
     if (newVal === null) return;
     if (name === 'x') this._x = clamp01(parseOr(newVal, 0.5));
     if (name === 'y') this._y = clamp01(parseOr(newVal, 0.5));
+    if (name === 'label-x' || name === 'label-y') this.render();
     this.updateFromValues();
   }
   render() {
+    const labelX = this.getAttribute('label-x') || 'X →';
+    const labelY = this.getAttribute('label-y') || '↑ Y';
     this.shadowRoot.innerHTML = `
       <style>
         :host {
@@ -357,12 +432,16 @@ class AudioXyPad extends HTMLElement {
           height: 100%;
           min-width: 0;
           min-height: 0;
+          /* Кастомизируемые акценты. Наследуются из Light DOM. */
+          --accent: #38bdf8;
+          --accent-glow: rgba(56, 189, 248, 0.4);
+          --accent-soft: rgba(56, 189, 248, 0.15);
+          --accent-faint: rgba(56, 189, 248, 0.10);
         }
         .pad-container {
           position: relative;
           width: 100%;
           height: 100%;
-          /* Больше не aspect-ratio: тянется под контейнер */
           background-color: #0b0c0e;
           background-image:
             linear-gradient(rgba(255,255,255,0.03) 1px, transparent 1px),
@@ -378,41 +457,49 @@ class AudioXyPad extends HTMLElement {
           -webkit-tap-highlight-color: transparent;
         }
         .pad-container:focus-visible {
-          border-color: #38bdf8;
-          box-shadow: inset 0 4px 12px rgba(0,0,0,0.9), 0 0 0 2px rgba(56,189,248,0.4);
+          border-color: var(--accent);
+          box-shadow: inset 0 4px 12px rgba(0,0,0,0.9), 0 0 0 2px var(--accent-glow);
         }
         .axis-line-x, .axis-line-y {
-          position: absolute; background-color: rgba(56, 189, 248, 0.15); pointer-events: none;
+          position: absolute; background-color: var(--accent-soft); pointer-events: none;
         }
         .axis-line-x { width: 100%; height: 1px; left: 0; top: 50%; }
         .axis-line-y { height: 100%; width: 1px; top: 0; left: 50%; }
         .pointer {
-          width: 24px; height: 24px; border: 2px solid #38bdf8; border-radius: 50%;
-          position: absolute; top: 50%; left: 50%;
-          transform: translate(-50%, -50%); pointer-events: none;
-          box-shadow: 0 0 8px #38bdf8, inset 0 0 4px #38bdf8;
+          width: 22px; height: 22px;
+          border: 2px solid var(--accent);
+          border-radius: 50%;
+          position: absolute;
+          top: 50%; left: 50%;
+          transform: translate(-50%, -50%);
+          pointer-events: none;
+          box-shadow: 0 0 8px var(--accent), inset 0 0 4px var(--accent);
           will-change: left, top;
         }
         .pointer::after {
-          content: ''; position: absolute; width: 6px; height: 6px;
-          background: #38bdf8; border-radius: 50%;
-          top: 50%; left: 50%; transform: translate(-50%, -50%);
+          content: '';
+          position: absolute;
+          width: 6px; height: 6px;
+          background: var(--accent);
+          border-radius: 50%;
+          top: 50%; left: 50%;
+          transform: translate(-50%, -50%);
         }
         .axis-labels {
           position: absolute; font-family: 'Courier New', Courier, monospace;
-          font-size: 9px; color: #3a4152; text-transform: uppercase;
+          font-size: 9px; color: var(--accent-faint); text-transform: uppercase;
           letter-spacing: 1px; pointer-events: none;
         }
         .label-x { bottom: 6px; right: 8px; }
         .label-y { top: 6px; left: 8px; }
       </style>
       <div class="pad-container" id="pad" tabindex="0" role="application"
-           aria-label="Управление звуком. Стрелки — точная настройка, Shift — медленнее.">
+           aria-label="Управление звуком. Стрелки — точная настройка.">
         <div class="axis-line-x" id="lineX"></div>
         <div class="axis-line-y" id="lineY"></div>
         <div class="pointer" id="pointer"></div>
-        <div class="axis-labels label-x">RATE →</div>
-        <div class="axis-labels label-y">↑ BRIGHT</div>
+        <div class="axis-labels label-x">${labelX}</div>
+        <div class="axis-labels label-y">${labelY}</div>
       </div>
     `;
   }
@@ -424,7 +511,7 @@ class AudioXyPad extends HTMLElement {
     this.updateUI(this._x * rect.width, (1 - this._y) * rect.height);
   }
   updateUI(xPx, yPx) {
-    const p = this.shadowRoot.getElementById('pointer');
+    const p  = this.shadowRoot.getElementById('pointer');
     const lx = this.shadowRoot.getElementById('lineX');
     const ly = this.shadowRoot.getElementById('lineY');
     if (p)  { p.style.left = `${xPx}px`; p.style.top = `${yPx}px`; }
@@ -489,7 +576,7 @@ customElements.define('audio-xy-pad', AudioXyPad);
 
 
 /* =========================================================================
-   4. РЭК: адаптивная сборка + аудио + сохранение
+   4. РЭК: аудио-движок + сохранение + два пада
    ========================================================================= */
 
 class AmbientSynthRack extends HTMLElement {
@@ -497,10 +584,16 @@ class AmbientSynthRack extends HTMLElement {
     super();
     this.attachShadow({ mode: 'open' });
 
-    this.STORAGE_KEY = 'ambient_synth_settings_v3';
+    this.STORAGE_KEY = 'ambient_synth_settings_v4';
 
+    // colorX → WIDTH (0..1 → 0.5..1.5)
+    // colorY → WARMTH (0..1 → 0..1)
     this.defaults = Object.freeze({
-      x: 0.5, y: 0.5, scaleMode: 'focus', volume: 0.5, drone: true
+      x: 0.5, y: 0.5,
+      colorX: 0.5, colorY: 0.2,
+      scaleMode: 'focus',
+      volume: 0.5,
+      drone: true
     });
     this.state = { ...this.defaults };
 
@@ -511,6 +604,7 @@ class AmbientSynthRack extends HTMLElement {
     };
 
     this.isPlaying = false;
+    this._initializing = false;
     this.audioCtx = null;
     this.timerId = null;
     this._debounceTimeout = null;
@@ -519,7 +613,7 @@ class AmbientSynthRack extends HTMLElement {
     this.currentScale = this.scales[this.state.scaleMode] || this.scales.focus;
   }
 
-  /* ---------- Сохранение / загрузка ---------- */
+  /* ---------- Сохранение ---------- */
 
   loadSettings() {
     try {
@@ -530,6 +624,8 @@ class AmbientSynthRack extends HTMLElement {
       if (!this.scales[this.state.scaleMode]) this.state.scaleMode = this.defaults.scaleMode;
       this.state.x = clamp01(parseOr(this.state.x, this.defaults.x));
       this.state.y = clamp01(parseOr(this.state.y, this.defaults.y));
+      this.state.colorX = clamp01(parseOr(this.state.colorX, this.defaults.colorX));
+      this.state.colorY = clamp01(parseOr(this.state.colorY, this.defaults.colorY));
       this.state.volume = clamp01(parseOr(this.state.volume, this.defaults.volume));
       this.state.drone = Boolean(this.state.drone);
     } catch (e) {
@@ -542,23 +638,31 @@ class AmbientSynthRack extends HTMLElement {
     if (this._debounceTimeout) clearTimeout(this._debounceTimeout);
     this._debounceTimeout = setTimeout(() => this.saveSettingsNow(), 250);
   }
-
   saveSettingsNow() {
     if (this._debounceTimeout) { clearTimeout(this._debounceTimeout); this._debounceTimeout = null; }
     try { localStorage.setItem(this.STORAGE_KEY, JSON.stringify(this.state)); } catch (e) {}
   }
+
+  /* Производные значения */
+  get width() { return 0.5 + this.state.colorX * 1.0; }   // 0.5 .. 1.5
+  get warmth() { return this.state.colorY; }              // 0 .. 1
 
   resetSettings() {
     this.state = { ...this.defaults };
     this.currentScale = this.scales[this.state.scaleMode];
 
     const pad = this.shadowRoot.getElementById('synthPad');
+    pad.setValues(this.state.x, this.state.y, false);
     pad.setAttribute('x', String(this.state.x));
     pad.setAttribute('y', String(this.state.y));
-    pad.setValues(this.state.x, this.state.y, false);
 
-    this.shadowRoot.getElementById('dispX').setAttribute('value', Math.round(this.state.x * 100) + '%');
-    this.shadowRoot.getElementById('dispY').setAttribute('value', Math.round(this.state.y * 100) + '%');
+    const colorPad = this.shadowRoot.getElementById('colorPad');
+    colorPad.setValues(this.state.colorX, this.state.colorY, false);
+    colorPad.setAttribute('x', String(this.state.colorX));
+    colorPad.setAttribute('y', String(this.state.colorY));
+
+    this.updateDisplays();
+
     this.shadowRoot.getElementById('scaleSelector').setAttribute('active-scale', this.state.scaleMode);
     this.shadowRoot.getElementById('volumeControl').setAttribute('value', String(this.state.volume));
 
@@ -569,9 +673,17 @@ class AmbientSynthRack extends HTMLElement {
     if (this.droneOsc1 && this.audioCtx) this.setDroneRoot(this.currentScale[0] / 2);
 
     this.applyAudioParams();
+    this.applyColorParams();
     this.applyVolume();
     this.applyDroneState();
     this.saveSettingsNow();
+  }
+
+  updateDisplays() {
+    this.shadowRoot.getElementById('dispX').setAttribute('value', Math.round(this.state.x * 100) + '%');
+    this.shadowRoot.getElementById('dispY').setAttribute('value', Math.round(this.state.y * 100) + '%');
+    this.shadowRoot.getElementById('dispCX').setAttribute('value', Math.round(this.width * 100) + '%');
+    this.shadowRoot.getElementById('dispCY').setAttribute('value', Math.round(this.warmth * 100) + '%');
   }
 
   /* ---------- Жизненный цикл ---------- */
@@ -585,7 +697,6 @@ class AmbientSynthRack extends HTMLElement {
     window.addEventListener('beforeunload', this._onBeforeUnload);
     window.addEventListener('pagehide', this._onBeforeUnload);
   }
-
   disconnectedCallback() {
     document.removeEventListener('visibilitychange', this._onVisibility);
     window.removeEventListener('beforeunload', this._onBeforeUnload);
@@ -599,8 +710,9 @@ class AmbientSynthRack extends HTMLElement {
 
   render() {
     const droneActive = this.state.drone ? 'active' : '';
+    const widthPct = Math.round(this.width * 100);
+    const warmPct = Math.round(this.warmth * 100);
 
-    // ---------- 9-SLICE SVG (60x60): углы с винтиками, края тянутся ----------
     const frameSVG = "data:image/svg+xml;utf8," +
       "<svg xmlns='http://www.w3.org/2000/svg' width='60' height='60' viewBox='0 0 60 60'>" +
         "<rect width='60' height='60' rx='10' ry='10' fill='%231e2127'/>" +
@@ -616,10 +728,9 @@ class AmbientSynthRack extends HTMLElement {
       <style>
         :host {
           display: block;
-          /* адаптивный размер: не больше 94% вьюпорта и не больше базового максимума */
           width: min(440px, 94vw);
-          height: min(760px, 94vh);
-          min-height: 460px;
+          height: min(800px, 94vh);
+          min-height: 480px;
           min-width: 260px;
         }
 
@@ -629,11 +740,8 @@ class AmbientSynthRack extends HTMLElement {
           box-sizing: border-box;
           width: 100%;
           height: 100%;
-
-          /* === 9-SLICE FRAME === */
           border: 15px solid transparent;
           border-image: url("${frameSVG}") 15 fill / 15px / 0 stretch;
-
           padding: 4px;
           box-shadow: 0 14px 32px rgba(0,0,0,0.75);
           user-select: none;
@@ -642,8 +750,8 @@ class AmbientSynthRack extends HTMLElement {
 
         .header {
           display: flex; justify-content: space-between; align-items: center;
-          margin-bottom: 10px; border-bottom: 2px dashed #32373f;
-          padding-bottom: 10px; gap: 6px;
+          margin-bottom: 8px; border-bottom: 2px dashed #32373f;
+          padding-bottom: 8px; gap: 6px;
           flex: 0 0 auto;
         }
         .title-wrap {
@@ -658,51 +766,71 @@ class AmbientSynthRack extends HTMLElement {
           text-shadow: 0 0 4px rgba(255,255,255,0.1);
           white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
         }
-        .controls-row {
-          display: flex; gap: 4px; align-items: center; flex: 0 0 auto;
-        }
+        .controls-row { display: flex; gap: 4px; align-items: center; flex: 0 0 auto; }
 
-        /* === Растущий XY-пад === */
-        .pad-wrapper {
+        /* Сетка двух падов */
+        .pads {
           flex: 1 1 auto;
-          min-height: 140px;
+          min-height: 220px;
+          display: grid;
+          grid-template-rows: 3fr 2fr;
+          gap: 8px;
+          margin: 4px 0;
+        }
+        .pad-block {
           display: flex;
-          margin: 2px 0;
-        }
-        audio-xy-pad {
-          flex: 1 1 auto;
-          min-width: 0;
+          flex-direction: column;
           min-height: 0;
+          min-width: 0;
         }
+        .pad-block audio-xy-pad {
+          flex: 1 1 auto;
+          min-height: 0;
+          min-width: 0;
+        }
+        .pad-caption {
+          font-family: 'Courier New', Courier, monospace;
+          font-size: 9px;
+          letter-spacing: 1px;
+          text-transform: uppercase;
+          text-align: center;
+          color: #566175;
+          margin-top: 3px;
+          flex: 0 0 auto;
+        }
+        .pad-caption.main { color: #38bdf8; }
+        .pad-caption.color { color: #f59e0b; }
 
         .display-grid {
-          margin-top: 10px;
+          margin-top: 8px;
           background: #0f1012; border: 1px solid #252930; border-radius: 4px;
-          padding: 8px 10px;
+          padding: 6px 10px;
           display: flex; justify-content: space-between;
           box-shadow: inset 0 2px 4px rgba(0,0,0,0.5);
           flex: 0 0 auto; gap: 8px;
         }
+        .display-grid + .display-grid { margin-top: 4px; }
+
         .hint {
-          margin-top: 8px; font-family: 'Courier New', Courier, monospace;
+          margin-top: 6px; font-family: 'Courier New', Courier, monospace;
           font-size: 9px; color: #3a4152; text-align: center;
-          letter-spacing: 0.4px; line-height: 1.4;
+          letter-spacing: 0.3px; line-height: 1.4;
           flex: 0 0 auto;
         }
 
-        /* Компактный режим для низких экранов (ландшафт, маленькие телефоны) */
-        @media (max-height: 640px) {
+        @media (max-height: 720px) {
+          .hint { display: none; }
+        }
+        @media (max-height: 620px) {
           :host { height: min(560px, 96vh); }
           .rack-unit { padding: 2px; border-width: 12px; }
           .header { margin-bottom: 6px; padding-bottom: 6px; }
-          .hint { display: none; }
-          .display-grid { margin-top: 6px; padding: 6px 8px; }
-          .pad-wrapper { min-height: 110px; }
+          .pads { min-height: 160px; grid-template-rows: 3fr 2fr; }
+          .display-grid { margin-top: 5px; padding: 4px 8px; }
+          .pad-caption { display: none; }
         }
-
         @media (max-width: 340px) {
           .title { font-size: 9px; letter-spacing: 0.8px; }
-          .rack-unit { padding: 2px; }
         }
       </style>
 
@@ -719,8 +847,29 @@ class AmbientSynthRack extends HTMLElement {
           </div>
         </div>
 
-        <div class="pad-wrapper">
-          <audio-xy-pad id="synthPad" x="${this.state.x}" y="${this.state.y}"></audio-xy-pad>
+        <div class="pads">
+          <div class="pad-block">
+            <audio-xy-pad
+              id="synthPad"
+              x="${this.state.x}"
+              y="${this.state.y}"
+              label-x="RATE →"
+              label-y="↑ BRIGHT"
+              style="--accent:#38bdf8; --accent-glow:rgba(56,189,248,0.4); --accent-soft:rgba(56,189,248,0.15); --accent-faint:rgba(56,189,248,0.10);"
+            ></audio-xy-pad>
+            <div class="pad-caption main">MAIN</div>
+          </div>
+          <div class="pad-block">
+            <audio-xy-pad
+              id="colorPad"
+              x="${this.state.colorX}"
+              y="${this.state.colorY}"
+              label-x="WIDTH →"
+              label-y="↑ WARMTH"
+              style="--accent:#f59e0b; --accent-glow:rgba(245,158,11,0.45); --accent-soft:rgba(245,158,11,0.15); --accent-faint:rgba(245,158,11,0.10);"
+            ></audio-xy-pad>
+            <div class="pad-caption color">COLOR</div>
+          </div>
         </div>
 
         <audio-scale-selector id="scaleSelector" active-scale="${this.state.scaleMode}"></audio-scale-selector>
@@ -731,18 +880,23 @@ class AmbientSynthRack extends HTMLElement {
           <audio-display-param id="dispX" name="RATE" value="${Math.round(this.state.x * 100)}%"></audio-display-param>
           <audio-display-param id="dispY" name="BRIGHT" value="${Math.round(this.state.y * 100)}%"></audio-display-param>
         </div>
+        <div class="display-grid">
+          <audio-display-param id="dispCX" name="WIDTH" value="${widthPct}%"></audio-display-param>
+          <audio-display-param id="dispCY" name="WARM" value="${warmPct}%"></audio-display-param>
+        </div>
 
-        <div class="hint">PAD: ← → темп · ↑ ↓ яркость · Shift — точнее</div>
+        <div class="hint">MAIN: темп · яркость  |  COLOR: ширина · насыщение</div>
       </div>
     `;
   }
 
   bindEvents() {
-    const powerBtn = this.shadowRoot.getElementById('powerBtn');
-    const droneBtn = this.shadowRoot.getElementById('droneBtn');
-    const resetBtn = this.shadowRoot.getElementById('resetBtn');
-    const synthPad = this.shadowRoot.getElementById('synthPad');
-    const scaleSel = this.shadowRoot.getElementById('scaleSelector');
+    const powerBtn  = this.shadowRoot.getElementById('powerBtn');
+    const droneBtn  = this.shadowRoot.getElementById('droneBtn');
+    const resetBtn  = this.shadowRoot.getElementById('resetBtn');
+    const synthPad  = this.shadowRoot.getElementById('synthPad');
+    const colorPad  = this.shadowRoot.getElementById('colorPad');
+    const scaleSel  = this.shadowRoot.getElementById('scaleSelector');
     const volumeCtrl = this.shadowRoot.getElementById('volumeControl');
 
     powerBtn.addEventListener('audio-click', () => this.togglePower());
@@ -759,9 +913,16 @@ class AmbientSynthRack extends HTMLElement {
     synthPad.addEventListener('pad-change', (e) => {
       this.state.x = e.detail.x;
       this.state.y = e.detail.y;
-      this.shadowRoot.getElementById('dispX').setAttribute('value', Math.round(this.state.x * 100) + '%');
-      this.shadowRoot.getElementById('dispY').setAttribute('value', Math.round(this.state.y * 100) + '%');
+      this.updateDisplays();
       this.applyAudioParams();
+      this.saveSettings();
+    });
+
+    colorPad.addEventListener('pad-change', (e) => {
+      this.state.colorX = e.detail.x;
+      this.state.colorY = e.detail.y;
+      this.updateDisplays();
+      this.applyColorParams();
       this.saveSettings();
     });
 
@@ -782,13 +943,19 @@ class AmbientSynthRack extends HTMLElement {
   /* ---------- Питание ---------- */
 
   async togglePower() {
+    if (this._initializing) return;
     const powerBtn = this.shadowRoot.getElementById('powerBtn');
     const powerLed = this.shadowRoot.getElementById('powerLed');
 
     if (!this.isPlaying) {
-      if (!this.audioCtx) this.initAudio();
-      if (this.audioCtx.state === 'suspended') {
-        try { await this.audioCtx.resume(); } catch (e) {}
+      this._initializing = true;
+      try {
+        if (!this.audioCtx) await this.initAudio();
+        if (this.audioCtx.state === 'suspended') {
+          try { await this.audioCtx.resume(); } catch (e) {}
+        }
+      } finally {
+        this._initializing = false;
       }
       this.isPlaying = true;
       powerBtn.setAttribute('active', '');
@@ -818,29 +985,44 @@ class AmbientSynthRack extends HTMLElement {
   }
 
   /* =======================================================================
-     АУДИО-ДВИЖОК  (без изменений относительно предыдущей версии)
+     АУДИО-ДВИЖОК
      ======================================================================= */
 
-  initAudio() {
+  async initAudio() {
     const Ctx = window.AudioContext || window.webkitAudioContext;
     this.audioCtx = new Ctx();
     const ctx = this.audioCtx;
 
+    // --- Финальный on/off ---
     this.powerGain = ctx.createGain();
     this.powerGain.gain.value = 0;
     this.powerGain.connect(ctx.destination);
 
+    // --- Мастер-громкость ---
     this.masterGain = ctx.createGain();
     this.masterGain.gain.value = this.state.volume;
     this.masterGain.connect(this.powerGain);
 
+    // --- Шина ширины стерео (M/S матрица) ---
+    const widthOutput = this.initWidthMatrix();
+    widthOutput.connect(this.masterGain);
+
+    // --- Сатурация (WARMTH) ---
+    this.initWarmth(widthOutput);
+
+    // --- Pre-mix шина: всё приходит сюда ---
+    this.preMixGain = ctx.createGain();
+    this.preMixGain.gain.value = 1;
+    this.preMixGain.connect(this.warmthInput);
+
+    // --- Шина нот ---
     this.notesBus = ctx.createGain();
     this.notesBus.gain.value = 1;
 
     this.dryGain = ctx.createGain();
     this.dryGain.gain.value = 0.75;
     this.notesBus.connect(this.dryGain);
-    this.dryGain.connect(this.masterGain);
+    this.dryGain.connect(this.preMixGain);
 
     this.convolver = ctx.createConvolver();
     this.convolver.buffer = createReverbIR(ctx, 3.5, 2.2);
@@ -848,7 +1030,7 @@ class AmbientSynthRack extends HTMLElement {
     this.reverbWet.gain.value = 0.45;
     this.notesBus.connect(this.convolver);
     this.convolver.connect(this.reverbWet);
-    this.reverbWet.connect(this.masterGain);
+    this.reverbWet.connect(this.preMixGain);
 
     this.delayNode = ctx.createDelay(2.0);
     this.delayNode.delayTime.value = 0.65;
@@ -864,7 +1046,7 @@ class AmbientSynthRack extends HTMLElement {
     this.delayFilter.connect(this.delayFeedback);
     this.delayFeedback.connect(this.delayNode);
     this.delayFilter.connect(this.delayWet);
-    this.delayWet.connect(this.masterGain);
+    this.delayWet.connect(this.preMixGain);
 
     this.toneFilter = ctx.createBiquadFilter();
     this.toneFilter.type = 'lowpass';
@@ -872,13 +1054,107 @@ class AmbientSynthRack extends HTMLElement {
     this.toneFilter.Q.value = 0.7;
     this.toneFilter.connect(this.notesBus);
 
+    // --- Дрон ---
     this.initDrone();
-    this.initNoise();
+
+    // --- Шум (AudioWorklet или буферный fallback) ---
+    await this.initNoise();
+
+    // --- LFO ---
     this.initLFOs();
 
     this.applyAudioParams();
+    this.applyColorParams();
     this.applyVolume();
     this.applyDroneState();
+  }
+
+  /* --------- WIDTH: M/S матрица ---------
+     L' = a·L + b·R
+     R' = c·L + d·R
+     a = d = (1+w)/2
+     b = c = (1-w)/2
+     w ∈ [0, 1.5]:  0 = моно, 1 = нейтраль, 1.5 = шире стерео
+  ------------------------------------------ */
+  initWidthMatrix() {
+    const ctx = this.audioCtx;
+    this.widthInput = ctx.createGain();
+    this.widthInput.gain.value = 1;
+
+    this.widthSplitter = ctx.createChannelSplitter(2);
+    this.widthMerger = ctx.createChannelMerger(2);
+
+    this.widthLL = ctx.createGain();
+    this.widthRL = ctx.createGain();
+    this.widthLR = ctx.createGain();
+    this.widthRR = ctx.createGain();
+
+    this.widthSumL = ctx.createGain();
+    this.widthSumR = ctx.createGain();
+
+    this.widthInput.connect(this.widthSplitter);
+    // splitter.output[0] = L, splitter.output[1] = R
+    this.widthSplitter.connect(this.widthLL, 0);
+    this.widthSplitter.connect(this.widthLR, 0);
+    this.widthSplitter.connect(this.widthRL, 1);
+    this.widthSplitter.connect(this.widthRR, 1);
+
+    this.widthLL.connect(this.widthSumL);
+    this.widthRL.connect(this.widthSumL);
+    this.widthLR.connect(this.widthSumR);
+    this.widthRR.connect(this.widthSumR);
+
+    this.widthSumL.connect(this.widthMerger, 0, 0);
+    this.widthSumR.connect(this.widthMerger, 0, 1);
+
+    return this.widthMerger;
+  }
+
+  setWidth(w) {
+    if (!this.widthLL) return;
+    const a = (1 + w) / 2;
+    const b = (1 - w) / 2;
+    const now = this.audioCtx.currentTime;
+    this.widthLL.gain.setTargetAtTime(a, now, 0.05);
+    this.widthRR.gain.setTargetAtTime(a, now, 0.05);
+    this.widthLR.gain.setTargetAtTime(b, now, 0.05);
+    this.widthRL.gain.setTargetAtTime(b, now, 0.05);
+  }
+
+  /* --------- WARMTH: параллельная tanh-сатурация ---------
+     - фиксированная кривая tanh(2.5·x) / tanh(2.5)
+     - сухой/влажный микс по параметру warmth
+     - влажный уровень × 0.65 — компенсация громкости
+  --------------------------------------------------------- */
+  initWarmth(outputNode) {
+    const ctx = this.audioCtx;
+
+    const curveSize = 1024;
+    const curve = new Float32Array(curveSize);
+    const drive = 2.5;
+    const norm = Math.tanh(drive);
+    for (let i = 0; i < curveSize; i++) {
+      const x = (i / (curveSize - 1)) * 2 - 1;
+      curve[i] = Math.tanh(x * drive) / norm;
+    }
+
+    this.warmthInput = ctx.createGain();
+    this.warmthInput.gain.value = 1;
+
+    this.warmthShaper = ctx.createWaveShaper();
+    this.warmthShaper.curve = curve;
+    this.warmthShaper.oversample = '2x';
+
+    this.warmthDryGain = ctx.createGain();
+    this.warmthWetGain = ctx.createGain();
+    this.warmthSum = ctx.createGain();
+
+    this.warmthInput.connect(this.warmthDryGain);
+    this.warmthDryGain.connect(this.warmthSum);
+    this.warmthInput.connect(this.warmthShaper);
+    this.warmthShaper.connect(this.warmthWetGain);
+    this.warmthWetGain.connect(this.warmthSum);
+    this.warmthSum.connect(outputNode);
   }
 
   initDrone() {
@@ -910,7 +1186,7 @@ class AmbientSynthRack extends HTMLElement {
     this.droneOsc2.connect(this.droneFilter);
     this.droneOsc3.connect(this.droneFilter);
     this.droneFilter.connect(this.droneGain);
-    this.droneGain.connect(this.masterGain);
+    this.droneGain.connect(this.preMixGain);
 
     this.droneOsc1.start(0);
     this.droneOsc2.start(0);
@@ -925,29 +1201,12 @@ class AmbientSynthRack extends HTMLElement {
     this.droneOsc3.frequency.setTargetAtTime(freq * 2, now, 0.6);
   }
 
-  initNoise() {
+  async initNoise() {
     const ctx = this.audioCtx;
-    const seconds = 4;
-    const bufferSize = seconds * ctx.sampleRate;
-    const noiseBuffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
-    const output = noiseBuffer.getChannelData(0);
 
-    let b0 = 0, b1 = 0, b2 = 0, b3 = 0, b4 = 0, b5 = 0, b6 = 0;
-    for (let i = 0; i < bufferSize; i++) {
-      const white = Math.random() * 2 - 1;
-      b0 = 0.99886 * b0 + white * 0.0555179;
-      b1 = 0.99332 * b1 + white * 0.0750759;
-      b2 = 0.96900 * b2 + white * 0.1538520;
-      b3 = 0.86650 * b3 + white * 0.3104856;
-      b4 = 0.55000 * b4 + white * 0.5329522;
-      b5 = -0.7616 * b5 - white * 0.0168980;
-      output[i] = (b0 + b1 + b2 + b3 + b4 + b5 + b6 + white * 0.5362) * 0.11;
-      b6 = white * 0.115926;
-    }
-
-    this.noiseSource = ctx.createBufferSource();
-    this.noiseSource.buffer = noiseBuffer;
-    this.noiseSource.loop = true;
+    // AudioWorklet или буферный fallback
+    this.noiseSource = await createNoiseSource(ctx);
+    this.noiseKind = this.noiseSource._kind || 'unknown';
 
     this.noiseHP = ctx.createBiquadFilter();
     this.noiseHP.type = 'highpass';
@@ -971,9 +1230,9 @@ class AmbientSynthRack extends HTMLElement {
     } else {
       this.noiseFilter.connect(this.noiseGain);
     }
-    this.noiseGain.connect(this.masterGain);
+    this.noiseGain.connect(this.preMixGain);
 
-    this.noiseSource.start(0);
+    console.info('[Ambient] Noise source:', this.noiseKind);
   }
 
   initLFOs() {
@@ -1028,88 +1287,4 @@ class AmbientSynthRack extends HTMLElement {
     this.lfo1DroneGain.gain.setTargetAtTime(lfoLevel, now, 0.5);
   }
 
-  applyAudioParams() {
-    if (!this.audioCtx || this.audioCtx.state === 'closed') return;
-    const now = this.audioCtx.currentTime;
-
-    const toneMin = 350, toneMax = 2200;
-    const toneTarget = toneMin * Math.pow(toneMax / toneMin, this.state.y);
-    this.toneFilter.frequency.setTargetAtTime(toneTarget, now, 0.08);
-
-    this.reverbWet.gain.setTargetAtTime(0.30 + this.state.y * 0.35, now, 0.15);
-    this.delayWet.gain.setTargetAtTime(0.15 + this.state.y * 0.25, now, 0.15);
-
-    const noiseTarget = 0.05 + this.state.x * 0.25;
-    this.noiseGain.gain.setTargetAtTime(noiseTarget, now, 0.25);
-
-    const noiseMin = 500, noiseMax = 3000;
-    const noiseFreqBase = noiseMin * Math.pow(noiseMax / noiseMin, this.state.y);
-    this.noiseFilter.frequency.setTargetAtTime(noiseFreqBase, now, 0.12);
-  }
-
-  startScheduler() {
-    const playNext = () => {
-      if (!this.isPlaying) return;
-      this.triggerNote();
-      const minInterval = 350, maxInterval = 3800;
-      const base = maxInterval - this.state.x * (maxInterval - minInterval);
-      const chaos = (Math.random() - 0.5) * base * 0.18;
-      this.timerId = setTimeout(playNext, Math.max(160, base + chaos));
-    };
-    playNext();
-  }
-
-  stopScheduler() { if (this.timerId) { clearTimeout(this.timerId); this.timerId = null; } }
-
-  triggerNote() {
-    if (!this.audioCtx || this.audioCtx.state === 'closed') return;
-    const now = this.audioCtx.currentTime;
-    const scale = this.currentScale;
-
-    const voiceCount = Math.random() < 0.25 ? 2 : 1;
-    const chosen = new Set();
-    let attempts = 0;
-    while (chosen.size < voiceCount && attempts < 8) {
-      chosen.add(Math.floor(Math.random() * scale.length));
-      attempts++;
-    }
-
-    chosen.forEach((idx, i) => {
-      const freq = scale[idx];
-      const detune = i === 0 ? 0 : (Math.random() - 0.5) * 12;
-      this.playVoice(freq, detune, now + i * 0.04);
-    });
-  }
-
-  playVoice(freq, detuneCents, startTime) {
-    const ctx = this.audioCtx;
-    const osc = ctx.createOscillator();
-    const oscGain = ctx.createGain();
-
-    osc.type = Math.random() < 0.7 ? 'triangle' : 'sine';
-    osc.frequency.setValueAtTime(freq, startTime);
-    osc.detune.setValueAtTime(detuneCents, startTime);
-
-    oscGain.gain.setValueAtTime(0, startTime);
-    const attack = 0.8 + Math.random() * 0.8;
-    const release = 4.5 + Math.random() * 3.5;
-    const peak = 0.16;
-
-    oscGain.gain.linearRampToValueAtTime(peak, startTime + attack);
-    oscGain.gain.exponentialRampToValueAtTime(0.001, startTime + attack + release);
-
-    osc.connect(oscGain);
-    oscGain.connect(this.toneFilter);
-    osc.start(startTime);
-    osc.stop(startTime + attack + release + 0.15);
-
-    osc.onended = () => {
-      try { osc.disconnect(); oscGain.disconnect(); } catch (e) {}
-    };
-  }
-}
-customElements.define('ambient-synth-rack', AmbientSynthRack);
-</script>
-
-</body>
-</html>
+  /* --------- Основные параметры (
